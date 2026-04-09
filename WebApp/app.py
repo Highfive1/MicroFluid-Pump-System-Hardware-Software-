@@ -3,7 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 import re
 import os
@@ -17,7 +17,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- ADVANCED UI STYLING (Modern Medical OS Theme) ---
+
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap');
@@ -242,6 +242,12 @@ def view_dashboard():
 
 @st.fragment(run_every=1)
 def render_live_monitor_fragment(target_id):
+    # Clear the buffer if the target device has changed
+    if st.session_state.get('monitor_target') != target_id:
+        st.session_state.monitor_target = target_id
+        st.session_state.live_buffer = []
+        st.session_state.focused_metric = None
+
     if 'focused_metric' not in st.session_state: st.session_state.focused_metric = None
     if 'live_buffer' not in st.session_state: st.session_state.live_buffer = []
     
@@ -255,9 +261,14 @@ def render_live_monitor_fragment(target_id):
     data = st.session_state.live_buffer
     latest = data[-1] if data else {}
 
-    ignore = ['device_id', 'patient_name', 'device_name', 'timestamp', 'status', 'patient_id']
-    keys = [k for k in latest.keys() if k not in ignore and isinstance(latest[k], (int, float))]
-    keys.sort()
+    # Removed 'status' and 'patient' from ignore so they can show up as non-numeric tags
+    ignore = ['device_id', 'patient_name', 'device_name', 'timestamp', 'patient_id']
+    
+    num_keys = [k for k in latest.keys() if k not in ignore and isinstance(latest[k], (int, float))]
+    num_keys.sort()
+    
+    non_num_keys = [k for k in latest.keys() if k not in ignore and not isinstance(latest[k], (int, float))]
+    non_num_keys.sort()
 
     if not data:
         st.markdown("""
@@ -267,9 +278,17 @@ def render_live_monitor_fragment(target_id):
             </div>
         """, unsafe_allow_html=True)
     else:
-        if keys:
-            cols = st.columns(len(keys))
-            for idx, key in enumerate(keys):
+        # Display Non-Numeric Status Variables gracefully
+        if non_num_keys:
+            with st.expander("Status Parameters", expanded=False):
+                bullet_list = "".join([f"<li style='margin-bottom: 8px;'><span style='color: #aaa; font-size: 14px;'>{k.replace('_', ' ').upper()}:</span> <span style='color: #00cc96; font-weight: 600; font-size: 15px;'>{str(latest[k]).upper()}</span></li>" for k in non_num_keys])
+                st.markdown(f"<ul style='padding-left: 20px;'>{bullet_list}</ul>", unsafe_allow_html=True)
+            st.markdown("<br>", unsafe_allow_html=True)
+
+        # Display Numeric Graphs / Selectors
+        if num_keys:
+            cols = st.columns(len(num_keys))
+            for idx, key in enumerate(num_keys):
                 val = latest[key]
                 is_focused = (st.session_state.focused_metric == key)
                 
@@ -284,7 +303,7 @@ def render_live_monitor_fragment(target_id):
                         st.session_state.focused_metric = None if is_focused else key
                         st.rerun()
 
-        show_keys = [st.session_state.focused_metric] if st.session_state.focused_metric else keys
+        show_keys = [st.session_state.focused_metric] if st.session_state.focused_metric else num_keys
         
         if show_keys:
             df = pd.DataFrame(data)
@@ -320,7 +339,7 @@ def render_live_monitor_fragment(target_id):
             fig.update_yaxes(showgrid=True, gridcolor='rgba(255,255,255,0.05)', zeroline=False)
             fig.update_xaxes(showgrid=False, visible=False)
             
-            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+            st.plotly_chart(fig, width="stretch", config={'displayModeBar': False})
 
 
 def view_monitor():
@@ -445,12 +464,13 @@ def render_control_telemetry_fragment(target_id):
     
     with st.container(border=True):
         if live_data:
-            ignored = ['device_id', 'patient_name', 'device_name', 'timestamp', 'status', 'patient_id']
-            valid_vars = {k: v for k, v in live_data.items() if k not in ignored and isinstance(v, (int, float))}
+            ignored = ['device_id', 'patient_name', 'device_name', 'timestamp', 'patient_id'] # Removed status
+            valid_vars = {k: v for k, v in live_data.items() if k not in ignored}
             
             if valid_vars:
                 for k, v in valid_vars.items():
-                    st.markdown(f"<div><span style='color:#888;'>{k}:</span> <span class='metric-value'>{v}</span></div>", unsafe_allow_html=True)
+                    val_str = f"{v:.2f}" if isinstance(v, float) else str(v)
+                    st.markdown(f"<div><span style='color:#888;'>{k}:</span> <span class='metric-value'>{val_str}</span></div>", unsafe_allow_html=True)
             else:
                 st.info("No numerical variables yet.")
         else:
@@ -595,68 +615,87 @@ def view_history():
         with c1:
             target_id = get_selected_device(pts, "hist")
         
+        # --- FIX: Store default times in session state so they don't overwrite user input ---
+        if "hist_start_default" not in st.session_state:
+            st.session_state.hist_start_default = datetime.now() - timedelta(hours=1)
+        if "hist_end_default" not in st.session_state:
+            st.session_state.hist_end_default = datetime.now()
+
         row2_c1, row2_c2 = st.columns(2)
         with row2_c1:
             st.caption("FROM")
-            date_from = st.date_input("Start Date", datetime.now() - timedelta(hours=1))
-            time_from = st.time_input("Start Time", (datetime.now() - timedelta(hours=1)).time())
+            date_from = st.date_input("Start Date", value=st.session_state.hist_start_default.date())
+            time_from = st.time_input("Start Time", value=st.session_state.hist_start_default.time())
         with row2_c2:
             st.caption("UPTO")
-            date_to = st.date_input("End Date", datetime.now())
-            time_to = st.time_input("End Time", datetime.now().time())
+            date_to = st.date_input("End Date", value=st.session_state.hist_end_default.date())
+            time_to = st.time_input("End Time", value=st.session_state.hist_end_default.time())
 
         st.markdown("<br>", unsafe_allow_html=True)
         fetch = st.button("Query Database", type="primary", width="stretch")
 
     if fetch:
-        dt_from = datetime.combine(date_from, time_from)
-        dt_to = datetime.combine(date_to, time_to)
+        # Capture local system timezone to handle UTC conversion correctly
+        local_tz = datetime.now().astimezone().tzinfo
+        
+        dt_from = datetime.combine(date_from, time_from).replace(tzinfo=local_tz)
+        dt_to = datetime.combine(date_to, time_to).replace(tzinfo=local_tz)
         
         if dt_from >= dt_to:
             st.error("Invalid Range: 'From' time must be earlier than 'Upto' time.")
         else:
             with st.spinner("Processing Time-Series Data..."):
-                lookback_mins = int((datetime.now() - dt_from).total_seconds() / 60)
-                if lookback_mins < 1: lookback_mins = 1
+                # Send explicit Start and End dates to InfluxDB instead of calculating lookback
+                df = db.get_history(target_id, dt_from, dt_to)
                 
-                df = db.get_history(target_id, lookback_mins)
-                if isinstance(df, list): df = pd.DataFrame(df)
+                if isinstance(df, list):
+                    if len(df) == 0:
+                        df = pd.DataFrame()
+                    else:
+                        df = pd.concat(df, ignore_index=True)
                 
                 if df.empty:
-                    st.error("No telemetry records found for the requested period.")
+                    st.error("No telemetry records found for the requested time period.")
                 else:
-                    df['_time'] = pd.to_datetime(df['_time'])
-                    df = df[(df['_time'] >= pd.Timestamp(dt_from).tz_localize(None)) & 
-                            (df['_time'] <= pd.Timestamp(dt_to).tz_localize(None))]
+                    # Convert InfluxDB UTC timestamps back to Local Time for graphing
+                    df['_time'] = pd.to_datetime(df['_time']).dt.tz_convert(local_tz)
                     
-                    if df.empty:
-                        st.warning("Data exists in the general window, but none matched the exact time range filters.")
-                    else:
-                        st.success(f"Retrieved {len(df)} matching samples")
-                        
-                        num_cols = df.select_dtypes(include=['number']).columns.tolist()
-                        num_cols = [c for c in num_cols if c not in ['result', 'table']]
-                        
-                        fig = go.Figure()
-                        for c in num_cols:
-                            color = "#00cc96" if "glucose" in c.lower() else None
-                            fig.add_trace(go.Scatter(x=df['_time'], y=df[c], name=c.title(), line=dict(width=2, color=color)))
-                        
-                        fig.update_layout(
-                            height=500, 
-                            paper_bgcolor='rgba(0,0,0,0)', 
-                            plot_bgcolor='rgba(30,33,48,0.3)', 
-                            font=dict(color='#888'),
-                            margin=dict(t=20),
-                            xaxis=dict(gridcolor='rgba(255,255,255,0.05)', title='Timestamp'), 
-                            yaxis=dict(gridcolor='rgba(255,255,255,0.05)', title='Measured Value'),
-                            hovermode="x unified"
-                        )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                        with st.expander("Diagnostic Table"):
-                            st.dataframe(df, use_container_width=True)
+                    st.success(f"Retrieved {len(df)} matching samples")
+                    
+                    # Ensure we separate graphable numerics and text-based logs
+                    num_cols = df.select_dtypes(include=['number']).columns.tolist()
+                    num_cols = [c for c in num_cols if c not in ['result', 'table']]
+                    
+                    fig = go.Figure()
+                    for c in num_cols:
+                        color = "#00cc96" if "glucose" in c.lower() else None
+                        fig.add_trace(go.Scatter(x=df['_time'], y=df[c], name=c.title(), line=dict(width=2, color=color)))
+                    
+                    fig.update_layout(
+                        height=500, 
+                        paper_bgcolor='rgba(0,0,0,0)', 
+                        plot_bgcolor='rgba(30,33,48,0.3)', 
+                        font=dict(color='#888'),
+                        margin=dict(t=20),
+                        xaxis=dict(gridcolor='rgba(255,255,255,0.05)', title='Timestamp'), 
+                        yaxis=dict(gridcolor='rgba(255,255,255,0.05)', title='Measured Value'),
+                        hovermode="x unified"
+                    )
+                    
+                    st.plotly_chart(fig, width="stretch")
+                    
+                    # --- NEW: Extract and display non-numeric (status/text) parameters ---
+                    non_num_cols = [c for c in df.columns if c not in num_cols and c not in ['_time', 'result', 'table', '_start', '_stop', '_measurement', 'device_id', 'patient_name']]
+                    if non_num_cols:
+                        st.markdown("### Status & Events Log")
+                        # Format dataframe to highlight the exact times status changed or was logged
+                        log_df = df[['_time'] + non_num_cols].copy()
+                        log_df.rename(columns={'_time': 'Timestamp'}, inplace=True)
+                        st.dataframe(log_df, width="stretch", hide_index=True)
+                        st.markdown("<br>", unsafe_allow_html=True)
 
+                    with st.expander("Diagnostic Table (Raw Data)"):
+                        st.dataframe(df, width="stretch")
 
 def view_setup():
     st.markdown('<h1 class="animate-up">System Settings</h1>', unsafe_allow_html=True)
@@ -688,7 +727,7 @@ def view_setup():
         if pts:
             st.dataframe(
                 pd.DataFrame(pts)[['patient_name', 'device_id', 'device_name', 'joined_at']], 
-                use_container_width=True, 
+                width="stretch", 
                 hide_index=True
             )
         else:
