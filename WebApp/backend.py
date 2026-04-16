@@ -11,9 +11,9 @@ import paho.mqtt.client as mqtt
 from datetime import datetime, timezone, timedelta
 
 # --- LOCAL CONFIGURATION ---
-MQTT_BROKER = "localhost" 
+MQTT_BROKER = "--- "    #write broker ip address ( if you want to host your laptop as broker write "localhost" )
 MQTT_PORT = 1883
-MQTT_TOPIC = "medical/pump/#" 
+MQTT_TOPIC = "___"     #topic name of mqtt eg- medical/pump/deviceid/....
 
 # PostgreSQL Config
 PG_CONFIG = {
