@@ -11,13 +11,13 @@ from backend import DatabaseService, MQTTService
 
 # --- PAGE CONFIG ---
 st.set_page_config(
-    page_title="InsulinPump OS", 
-    page_icon="🩸", 
+    page_title="Pump", 
+    page_icon="🔜", 
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-
+# --- ADVANCED UI STYLING (Modern Medical OS Theme) ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap');
