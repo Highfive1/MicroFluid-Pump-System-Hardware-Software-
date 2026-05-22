@@ -275,14 +275,11 @@ Important:
 
 ## UI Pages
 
-### Dashboard
-
-High-level overview widgets and device selection.
 
 ### Live Monitor
 
 - Smooth rolling 2-minute chart window (old points slide out, new points slide in)
-- Stable Plotly rendering (no blinking) using:
+- Stable Plotly rendering using:
   - stable Streamlit chart keys
   - Plotly `uirevision`
 
