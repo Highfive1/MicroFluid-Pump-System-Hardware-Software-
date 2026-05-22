@@ -175,7 +175,6 @@ class MQTTService:
         self.cgm_msg_count = {}  # device_id -> count
         self.cgm_last_seen = {}  # device_id -> epoch seconds
         self.last_valid_rpm = {} # Tracks the last valid actual_rpm per device
-        self.last_mqtt_error = None
     def start(self):
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
@@ -296,7 +295,4 @@ class MQTTService:
             self.data_queue.put(payload)
             if self.data_queue.qsize() > 500: self.data_queue.get() 
         except Exception as e:
-            try:
-                self.last_mqtt_error = str(e)
-            except Exception:
-                pass
+            pass
