@@ -2,6 +2,7 @@ import time
 import json
 import queue
 import threading
+from collections import deque
 import psycopg2
 import pandas as pd
 from psycopg2.extras import RealDictCursor
@@ -11,24 +12,24 @@ import paho.mqtt.client as mqtt
 from datetime import datetime, timezone, timedelta
 
 # --- LOCAL CONFIGURATION ---
-MQTT_BROKER = "--- "    #write broker ip address ( if you want to host your laptop as broker write "localhost" )
+MQTT_BROKER = "localhost" # Reverted to localhost for better WSL bridging
 MQTT_PORT = 1883
-MQTT_TOPIC = "___"     #topic name of mqtt eg- medical/pump/deviceid/....
+MQTT_TOPIC = "medical/pump/#" # Subscribe broadly, filter carefully in _on_message
 
 # PostgreSQL Config
 PG_CONFIG = {
-    "dbname": " ---",
-    "user": " ---",                      #Enter the fields with your configuration of postgres
-    "password": " ---",
-    "host": " ---",
-    "port": " --- "
+    "dbname": "med_db",
+    "user": "postgres",
+    "password": "password",
+    "host": "localhost",
+    "port": "5432"
 }
 
 # InfluxDB Config
-INFLUX_URL = "___"     #http://localhost:8086
-INFLUX_TOKEN = "___"                  #Enter the fields with your configuration of Influx
-INFLUX_ORG = "___"
-INFLUX_BUCKET = "___"
+INFLUX_URL = "http://localhost:8086"
+INFLUX_TOKEN = "etcFwGBgL0rewRzKeVtVoSIE6v4mYwnKRypKMc5RiLSK-YmdHek1g_d0oUS7QqJ-AT_OSEXKvvNFLOVJf-9Fdw==" 
+INFLUX_ORG = "IIEST, Shibpur"
+INFLUX_BUCKET = "NewHW"
 
 class DatabaseService:
     def __init__(self):
@@ -169,7 +170,12 @@ class MQTTService:
         self.db = db_service
         self.device_heartbeats = {}
         self.latest_data = {} # Stores last known telemetry per device
-
+        self.cgm_latest_data = {} # Stores last known CGM payload per device (topics ending with /cgm)
+        self.cgm_history = {}  # device_id -> deque of recent /cgm payloads
+        self.cgm_msg_count = {}  # device_id -> count
+        self.cgm_last_seen = {}  # device_id -> epoch seconds
+        self.last_valid_rpm = {} # Tracks the last valid actual_rpm per device
+        self.last_mqtt_error = None
     def start(self):
         self.client.on_connect = self._on_connect
         self.client.on_message = self._on_message
@@ -199,23 +205,98 @@ class MQTTService:
 
     def _on_message(self, client, userdata, msg):
         try:
-            topic = msg.topic
-            
-            # Strict filtering: We only want telemetry arriving on the /data topic
-            if not topic.endswith("/data"): 
-                return 
-            
+            topic = msg.topic            # Strict filtering: accept device telemetry on /data and CGM payloads on /cgm
+            topic_l = str(topic).lower()
+            is_data = topic_l.endswith('/data')
+            is_cgm = topic_l.endswith('/cgm') or topic_l.endswith('cgm')
+            if (not is_data) and (not is_cgm):
+                return
             payload = json.loads(msg.payload.decode())
             dev_id = payload.get("device_id")
+            # Fallback: derive device_id from topic when payload omits it
+            if not dev_id:
+                try:
+                    parts = str(topic).split('/')
+                    # Expect: medical/pump/<device_id>/cgm or /data
+                    if len(parts) >= 4 and parts[0] == 'medical' and parts[1] == 'pump':
+                        dev_id = parts[2]
+                        payload['device_id'] = dev_id
+                except Exception:
+                    dev_id = None
             
             payload['timestamp'] = datetime.now().strftime("%H:%M:%S")
+
+            # Ensure caches exist (in case an older cached instance is running)
+            if not hasattr(self, 'cgm_latest_data'):
+                self.cgm_latest_data = {}
+            if not hasattr(self, 'latest_data'):
+                self.latest_data = {}
+            if not hasattr(self, 'device_heartbeats'):
+                self.device_heartbeats = {}
             
             if dev_id:
+                # CGM payloads: store and skip /data-specific filters
+                if is_cgm:
+                    if not hasattr(self, 'cgm_latest_data'):
+                        self.cgm_latest_data = {}
+                    self.device_heartbeats[dev_id] = time.time()
+                    self.cgm_latest_data[dev_id] = payload
+                    if dev_id not in self.cgm_history:
+                        self.cgm_history[dev_id] = deque(maxlen=360)  # ~30 min at 5s
+                    self.cgm_history[dev_id].append(payload)
+                    # Still persist to Influx for history views
+                    # Use dedicated numeric fields to avoid Influx field-type conflicts on 'glucose'/'trend'.
+                    payload_db = dict(payload)
+                    try:
+                        if 'glucose' in payload_db:
+                            payload_db['cgm_glucose'] = float(payload_db.get('glucose'))
+                    except Exception:
+                        pass
+                    try:
+                        if 'trend' in payload_db:
+                            payload_db['cgm_trend'] = float(payload_db.get('trend'))
+                    except Exception:
+                        pass
+                    self.db.save_telemetry(payload_db)
+                    return
+
+                # --- FILTER LAYER: actual_rpm ---
+                if "actual_rpm" in payload:
+                    try:
+                        rpm_val = float(payload["actual_rpm"])
+                        if abs(rpm_val) > 50:  
+                            # Spiked value detected: substitute or drop
+                            if dev_id in self.last_valid_rpm:
+                                payload["actual_rpm"] = self.last_valid_rpm[dev_id]
+                            else:
+                                del payload["actual_rpm"]
+                        else:
+                            # Clean value: safely record to memory
+                            self.last_valid_rpm[dev_id] = rpm_val
+                            payload["actual_rpm"] = rpm_val
+                    except (ValueError, TypeError):
+                        # Catches unparseable garbage strings
+                        if dev_id in self.last_valid_rpm:
+                            payload["actual_rpm"] = self.last_valid_rpm[dev_id]
+                        else:
+                            del payload["actual_rpm"]
+
                 self.device_heartbeats[dev_id] = time.time()
-                self.latest_data[dev_id] = payload # Update cache for formula calculations
+                if is_cgm:
+                    self.cgm_latest_data[dev_id] = payload
+                    if dev_id not in self.cgm_history:
+                        self.cgm_history[dev_id] = deque(maxlen=360)  # ~30 min at 5s
+                    self.cgm_history[dev_id].append(payload)
+                    self.cgm_msg_count[dev_id] = int(self.cgm_msg_count.get(dev_id, 0)) + 1
+                    self.cgm_last_seen[dev_id] = time.time()
+                else:
+                    self.latest_data[dev_id] = payload # Update cache for formula calculations
 
             self.db.save_telemetry(payload)
             self.data_queue.put(payload)
             if self.data_queue.qsize() > 500: self.data_queue.get() 
         except Exception as e:
-            print(f" Msg Error: {e}")
+            try:
+                self.last_mqtt_error = str(e)
+            except Exception:
+                pass
