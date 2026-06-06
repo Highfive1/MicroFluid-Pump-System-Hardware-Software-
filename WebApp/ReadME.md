@@ -120,7 +120,7 @@ This section explains what each key file does and which functions/classes matter
   - Notes:
     - `/cgm` messages also write numeric-safe fields `cgm_glucose` and `cgm_trend` into Influx.
 
-### Meal Detection
+### Meal Detection {Needs Testing}
 
 - `meal_detection_algo.py`
   - Purpose:
@@ -685,7 +685,7 @@ If you change your CGM publish rate:
 
 ---
 
-## Troubleshooting
+## Troubleshooting / Current issues that needs to be fixed
 
 ### CGM not showing in Patient Profile
 
@@ -713,5 +713,3 @@ mosquitto_sub -h localhost -p 1883 -t 'medical/pump/+/cgm' -v
 
 ---
 
-
-Educational and research use.
