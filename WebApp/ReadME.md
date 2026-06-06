@@ -229,7 +229,7 @@ This avoids InfluxDB field-type conflicts if `glucose`/`trend` arrive as mixed t
 
 ---
 
-## Meal Detection and Auto-Bolus(implemented but not tested)
+## Meal Detection and Auto-Bolus
 
 ### Meal Detection Pipeline
 
@@ -248,13 +248,13 @@ Sampling interval:
 - `app.py` constructs the meal detector using a sampling interval that matches the CGM publish rate.
 - If you change the CGM publish interval, update this value accordingly.
 
-### UI Notification(This feature is not tested)
+### UI Notification
 
 When a meal is detected:
 - The Live Monitor page shows a visible warning banner.
 - A toast notification is attempted (if supported by your Streamlit version).
 
-### Auto-Bolus Delivery(This feature is not tested)
+### Auto-Bolus Delivery
 
 Behavior:
 - If a meal is detected and the user has a previously saved `bolus_dose`, the webapp automatically publishes:
@@ -275,11 +275,14 @@ Important:
 
 ## UI Pages
 
+### Dashboard
+
+High-level overview widgets and device selection.
 
 ### Live Monitor
 
 - Smooth rolling 2-minute chart window (old points slide out, new points slide in)
-- Stable Plotly rendering using:
+- Stable Plotly rendering (no blinking) using:
   - stable Streamlit chart keys
   - Plotly `uirevision`
 
@@ -332,23 +335,287 @@ mosquitto -v
 
 Default port: `1883`
 
-### 2) Start Databases
+### 2) Setup PostgreSQL (Registry Database)
 
-PostgreSQL:
-- Ensure PostgreSQL is running
-- Create the database and credentials matching `backend.py` `PG_CONFIG`
+The application uses PostgreSQL only for the patient/device registry.
 
-InfluxDB v2:
-- Ensure InfluxDB is running at `http://localhost:8086`
-- Ensure bucket/org/token match `backend.py`
+Current code expectation in `backend.py`:
 
-### 3) Install Python Dependencies
+```python
+PG_CONFIG = {
+    "dbname": "med_db",
+    "user": "postgres",
+    "password": "password",
+    "host": "localhost",
+    "port": "5432"
+}
+```
+
+You can either:
+- keep these exact values and create PostgreSQL to match them, or
+- change `PG_CONFIG` in `backend.py` to match your own PostgreSQL setup.
+
+#### Install PostgreSQL (Ubuntu / WSL)
+
+```bash
+sudo apt update
+sudo apt install postgresql postgresql-contrib
+```
+
+#### Start and enable PostgreSQL
+
+```bash
+sudo service postgresql start
+sudo service postgresql status
+```
+
+If you want it to start automatically with your Linux environment:
+
+```bash
+sudo systemctl enable postgresql
+```
+
+#### Create the application database
+
+Open the PostgreSQL shell as the `postgres` superuser:
+
+```bash
+sudo -u postgres psql
+```
+
+Inside `psql`, create the database:
+
+```sql
+CREATE DATABASE med_db;
+```
+
+If you want to use the default `postgres` user exactly as the code expects, set its password:
+
+```sql
+ALTER USER postgres WITH PASSWORD 'password';
+```
+
+Then exit:
+
+```sql
+\q
+```
+
+#### Verify login using the same values as the app
+
+```bash
+psql -h localhost -U postgres -d med_db -W
+```
+
+When prompted, enter:
+
+```text
+password
+```
+
+If login works, PostgreSQL is ready for the app.
+
+#### What the app creates automatically
+
+When the webapp starts, `DatabaseService.connect()` calls `_init_pg_table()` and creates this table automatically if it does not already exist:
+
+```sql
+CREATE TABLE IF NOT EXISTS patients (
+    device_id TEXT PRIMARY KEY,
+    patient_name TEXT,
+    device_name TEXT,
+    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+So you do NOT need to create tables manually for the registry.
+
+#### Common PostgreSQL issues
+
+- `password authentication failed for user "postgres"`:
+  - The password in PostgreSQL does not match `backend.py`.
+- `database "med_db" does not exist`:
+  - Create it with `CREATE DATABASE med_db;`
+- connection refused on port `5432`:
+  - PostgreSQL service is not running.
+
+### 3) Setup InfluxDB v2 (Time-Series Database)
+
+The application uses InfluxDB for all time-series telemetry and history queries.
+
+Current code expectation in `backend.py`:
+
+```python
+INFLUX_URL = "http://localhost:8086"
+INFLUX_TOKEN = "<your token>"
+INFLUX_ORG = "IIEST, Shibpur"
+INFLUX_BUCKET = "NewHW"
+```
+
+You can either:
+- create InfluxDB resources that match these values, or
+- update `backend.py` to match your own InfluxDB org/bucket/token.
+
+#### Install InfluxDB v2 (Ubuntu / WSL)
+
+If InfluxDB is not already installed, use the official package instructions for your distro. On Ubuntu-based systems, the typical flow is:
+
+```bash
+wget -q https://repos.influxdata.com/influxdata-archive_compat.key
+echo 'deb [signed-by=/etc/apt/keyrings/influxdata-archive_compat.gpg] https://repos.influxdata.com/ubuntu stable main' | sudo tee /etc/apt/sources.list.d/influxdb.list
+sudo apt update
+sudo apt install influxdb2 influxdb2-cli
+```
+
+If the keyring directory does not exist, create it first:
+
+```bash
+sudo mkdir -p /etc/apt/keyrings
+```
+
+#### Start and verify InfluxDB
+
+```bash
+sudo service influxdb start
+sudo service influxdb status
+```
+
+You should then be able to open:
+
+```text
+http://localhost:8086
+```
+
+#### Initial InfluxDB UI setup
+
+Open the InfluxDB web UI in your browser and complete the first-run setup.
+
+You will be asked for:
+- Username
+- Password
+- Organization
+- Initial bucket
+
+For easiest compatibility with the current code, use:
+- Organization: `IIEST, Shibpur`
+- Bucket: `NewHW`
+
+If you choose different names, update:
+- `INFLUX_ORG`
+- `INFLUX_BUCKET`
+
+in `backend.py`.
+
+#### Create or copy an API token
+
+After setup:
+1. Open InfluxDB UI
+2. Go to `Load Data` or `Data`
+3. Open `API Tokens`
+4. Create an `All Access Token` or a token with read/write access to your bucket
+5. Copy that token
+
+Then paste it into `backend.py`:
+
+```python
+INFLUX_TOKEN = "your_real_token_here"
+```
+
+#### Optional CLI verification
+
+If the CLI is installed, set connection details:
+
+```bash
+influx config create \
+  --config-name local \
+  --host-url http://localhost:8086 \
+  --org "IIEST, Shibpur" \
+  --token "your_real_token_here" \
+  --active
+```
+
+Verify buckets:
+
+```bash
+influx bucket list
+```
+
+You should see the bucket used by the app, for example:
+
+```text
+NewHW
+```
+
+#### What the app creates automatically
+
+When `DatabaseService.connect()` runs:
+- it connects to InfluxDB
+- checks whether the configured bucket exists
+- creates the bucket automatically if it is missing and the token has enough permissions
+
+So in many cases, you only need:
+- a running InfluxDB server
+- a valid org
+- a valid token
+
+#### What the app stores in InfluxDB
+
+Measurement:
+
+```text
+telemetry
+```
+
+Tags:
+- `device_id`
+- `patient_name`
+
+Fields:
+- all numeric telemetry fields
+- all non-numeric telemetry fields as strings
+- dedicated CGM-safe history fields:
+  - `cgm_glucose`
+  - `cgm_trend`
+
+#### Common InfluxDB issues
+
+- `InfluxDB Error: ... unauthorized`:
+  - token is invalid or does not have access to the org/bucket
+- `bucket not found`:
+  - bucket name in `backend.py` does not match your actual bucket
+- connection refused on `8086`:
+  - InfluxDB service is not running
+- history queries return no CGM values:
+  - check that `/cgm` messages are being published and received
+  - query a time range in which CGM was actually streaming
+  - prefer `cgm_glucose` and `cgm_trend` in History because they are stored as guaranteed numeric fields
+
+### 4) Check `backend.py` Configuration
+
+Before running the app, confirm these values in `backend.py` match your actual local setup:
+
+```python
+PG_CONFIG = {
+    "dbname": "med_db",
+    "user": "postgres",
+    "password": "password",
+    "host": "localhost",
+    "port": "5432"
+}
+
+INFLUX_URL = "http://localhost:8086"
+INFLUX_TOKEN = "your_real_token_here"
+INFLUX_ORG = "IIEST, Shibpur"
+INFLUX_BUCKET = "NewHW"
+```
+
+### 5) Install Python Dependencies
 
 ```bash
 pip install streamlit pandas numpy plotly psycopg2-binary influxdb-client paho-mqtt
 ```
 
-### 4) Run the Web App
+### 6) Run the Web App
 
 ```bash
 streamlit run app.py
@@ -441,8 +708,10 @@ mosquitto_sub -h localhost -p 1883 -t 'medical/pump/+/cgm' -v
 
 ### History does not show CGM signals
 
-- This issue needs to be fixed.
+- Prefer selecting `cgm_glucose` / `cgm_trend` for CGM history, since they are guaranteed numeric fields.
+- Ensure you query a time range where CGM messages were being published.
 
 ---
 
 
+Educational and research use.
