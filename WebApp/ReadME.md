@@ -1,6 +1,6 @@
-# WebApp for Closed Loop Controlled Insulin Infusion Pump
+# WebApp for Closed Loop Controlled Micro-FLuid Infusion Pump
 
-Centralized monitoring + control web application for an insulin infusion pump ecosystem.
+Centralized monitoring + control web application for an insulin or Micro-fluid infusion pump ecosystem.
 
 This project provides:
 - Live telemetry monitoring (real-time charts)
